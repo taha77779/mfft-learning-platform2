@@ -1,1 +1,49 @@
+name: Smart Auto Unzip and Overwrite
 
+on:
+  push:
+    paths:
+      - 'uploads/**.zip' # يشتغل الروبوت تلقائياً عند رفع أي ملف مضغوط داخل مجلد uploads
+
+permissions:
+  contents: write # إعطاء الروبوت صلاحية الكتابة والتعديل واستبدال الملفات في المستودع
+
+jobs:
+  unzip-process:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. جلب نسخة من ملفات المستودع الحالية
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      # 2. فك ضغط الملف مع إجبار الاستبدال والتنظيف
+      - name: Unzip and Move Contents
+        run: |
+          # إنشاء مجلد مؤقت لفك الضغط بداخله بأمان
+          mkdir temp_extraction
+          
+          # فك الضغط مع استخدام أمر (-o) لإجبار استبدال أي ملف أو مجلد مكرر بنفس الاسم فوراً
+          unzip -o uploads/*.zip -d temp_extraction/
+          
+          # التحقق مما إذا كانت الملفات داخل مجلد فرعي، ونقلها مباشرة للمجلد الرئيسي للمستودع
+          if [ $(ls -1 temp_extraction | wc -l) -eq 1 ] && [ -d temp_extraction/* ]; then
+            mv temp_extraction/*/* ./ 2>/dev/null || true
+            mv temp_extraction/*/.* ./ 2>/dev/null || true
+          else
+            mv temp_extraction/* ./ 2>/dev/null || true
+            mv temp_extraction/.* ./ 2>/dev/null || true
+          fi
+          
+          # تنظيف المستودع وحذف المجلدات المؤقتة والملف المضغوط ليبقى المشروع نظيفاً
+          rm -rf temp_extraction
+          rm -rf uploads
+          
+      # 3. حفظ التغييرات الجديدة ورفعها للمستودع باسم الروبوت
+      - name: Commit and Push Changes
+        run: |
+          git config --local user.email "github-actions[bot]@://github.com"
+          git config --local user.name "github-actions[bot]"
+          git add .
+          git commit -m "Smart unzip: Extracted and overwrote files directly to root"
+          git push origin main
