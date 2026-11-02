@@ -1,0 +1,1207 @@
+import React, { useEffect, useState } from 'react'
+import { supabase } from './supabase.js'
+
+const BUCKET = 'mfft-images'
+const OPTION_COUNT = 8
+const MAX_IMAGE_SIZE = 5 * 1024 * 1024
+
+function makeId() {
+  return globalThis.crypto?.randomUUID?.() ||
+    `${Date.now()}-${Math.random().toString(16).slice(2)}`
+}
+
+function getFirstValue(row, keys) {
+  for (const key of keys) {
+    if (row?.[key] !== undefined && row?.[key] !== null) {
+      return row[key]
+    }
+  }
+  return null
+}
+
+function getQuestionImage(row) {
+  return getFirstValue(row, [
+    'original_image_path',
+    'original_image',
+    'image_path',
+    'image_url',
+    'stimulus_image_path',
+    'stimulus_image'
+  ])
+}
+
+function getOptionImage(row) {
+  return getFirstValue(row, [
+    'image_path',
+    'option_image_path',
+    'image_url',
+    'option_image'
+  ])
+}
+
+function getQuestionOrder(row) {
+  return getFirstValue(row, [
+    'question_order',
+    'question_number',
+    'position',
+    'sort_order',
+    'order_number'
+  ])
+}
+
+export default function App() {
+  const [page, setPage] = useState(
+    window.location.hash === '#/admin' ? 'admin' : 'student'
+  )
+
+  const [admin, setAdmin] = useState(null)
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [message, setMessage] = useState('')
+
+  const [student, setStudent] = useState({
+    name: '',
+    phone: '',
+    age: '',
+    email: ''
+  })
+
+  const [createdCode, setCreatedCode] = useState('')
+  const [studentCode, setStudentCode] = useState('')
+  const [studentPhone, setStudentPhone] = useState('')
+  const [studentSession, setStudentSession] = useState(null)
+
+  const [tests, setTests] = useState([])
+  const [testTitle, setTestTitle] = useState('')
+  const [testInstructions, setTestInstructions] = useState('')
+  const [editingId, setEditingId] = useState(null)
+
+  const [selectedTestId, setSelectedTestId] = useState('')
+  const [questionOrder, setQuestionOrder] = useState('1')
+  const [originalFile, setOriginalFile] = useState(null)
+  const [optionFiles, setOptionFiles] = useState(
+    Array(OPTION_COUNT).fill(null)
+  )
+  const [correctIndex, setCorrectIndex] = useState(0)
+  const [questions, setQuestions] = useState([])
+
+  // حالة اختبار الطالب
+  const [studentTestData, setStudentTestData] = useState(null)
+  const [attemptId, setAttemptId] = useState('')
+  const [testStarted, setTestStarted] = useState(false)
+  const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0)
+  const [testFinished, setTestFinished] = useState(false)
+  const [answerLoading, setAnswerLoading] = useState(false)
+  const [testMessage, setTestMessage] = useState('')
+
+  useEffect(() => {
+    const changePage = () => {
+      setPage(window.location.hash === '#/admin' ? 'admin' : 'student')
+      setMessage('')
+    }
+
+    window.addEventListener('hashchange', changePage)
+    return () => window.removeEventListener('hashchange', changePage)
+  }, [])
+
+  useEffect(() => {
+    if (admin) loadTests()
+  }, [admin])
+
+  useEffect(() => {
+    if (admin && selectedTestId) {
+      loadQuestions(selectedTestId)
+    } else {
+      setQuestions([])
+    }
+  }, [admin, selectedTestId])
+
+  async function adminLogin(e) {
+    e.preventDefault()
+    setLoading(true)
+    setMessage('')
+
+    const { data, error } = await supabase.auth.signInWithPassword({
+      email,
+      password
+    })
+
+    if (error) {
+      setMessage('بيانات الدخول غير صحيحة.')
+      setLoading(false)
+      return
+    }
+
+    const { data: profile, error: profileError } = await supabase
+      .from('admins')
+      .select('id, full_name')
+      .eq('id', data.user.id)
+      .maybeSingle()
+
+    if (profileError || !profile) {
+      await supabase.auth.signOut()
+      setMessage('هذا الحساب ليس مسجلاً كمدير.')
+      setLoading(false)
+      return
+    }
+
+    setAdmin(profile)
+    setLoading(false)
+  }
+
+  async function addStudent(e) {
+    e.preventDefault()
+    setLoading(true)
+    setMessage('')
+    setCreatedCode('')
+
+    try {
+      const { data, error } = await supabase.functions.invoke(
+        'admin-create-student',
+        {
+          body: {
+            student_name: student.name.trim(),
+            phone: student.phone.trim(),
+            age: Number(student.age),
+            email: student.email.trim() || null
+          }
+        }
+      )
+
+      if (error) throw error
+      if (!data?.student_code) {
+        throw new Error('لم يتم استلام الرقم التعريفي.')
+      }
+
+      setCreatedCode(data.student_code)
+      setStudent({ name: '', phone: '', age: '', email: '' })
+      setMessage('تمت إضافة الطالب بنجاح.')
+    } catch (error) {
+      setMessage(error.message || 'تعذرت إضافة الطالب.')
+    }
+
+    setLoading(false)
+  }
+
+  async function studentLogin(e) {
+    e.preventDefault()
+    setLoading(true)
+    setMessage('')
+    setStudentSession(null)
+
+    try {
+      const { data, error } = await supabase.functions.invoke(
+        'student-login',
+        {
+          body: {
+            student_code: studentCode.trim().toUpperCase(),
+            phone: studentPhone.trim()
+          }
+        }
+      )
+
+      if (error) throw error
+
+      if (!data?.success || !data?.token || !data?.student) {
+        throw new Error(data?.error || 'تعذر تسجيل الدخول.')
+      }
+
+      setStudentSession(data)
+      setMessage('تم تسجيل الدخول بنجاح.')
+    } catch (error) {
+      setMessage(error.message || 'تعذر تسجيل الدخول.')
+    }
+
+    setLoading(false)
+  }
+
+  async function loadTests() {
+    const { data, error } = await supabase
+      .from('mfft_tests')
+      .select('id, title, instructions, is_active, created_at')
+      .order('created_at', { ascending: false })
+
+    if (error) {
+      setMessage('تعذر تحميل الاختبارات: ' + error.message)
+      return
+    }
+
+    const list = data || []
+    setTests(list)
+
+    if (
+      !selectedTestId ||
+      !list.some(test => test.id === selectedTestId)
+    ) {
+      setSelectedTestId(list[0]?.id || '')
+    }
+  }
+
+  async function saveTest(e) {
+    e.preventDefault()
+    setLoading(true)
+    setMessage('')
+
+    try {
+      const values = {
+        title: testTitle.trim(),
+        instructions: testInstructions.trim()
+      }
+
+      if (!values.title) {
+        throw new Error('أدخل عنوان الاختبار.')
+      }
+
+      let result
+
+      if (editingId) {
+        result = await supabase
+          .from('mfft_tests')
+          .update(values)
+          .eq('id', editingId)
+      } else {
+        result = await supabase
+          .from('mfft_tests')
+          .insert({
+            ...values,
+            is_active: false,
+            created_by: admin.id
+          })
+      }
+
+      if (result.error) throw result.error
+
+      setTestTitle('')
+      setTestInstructions('')
+      setEditingId(null)
+      setMessage(editingId ? 'تم تحديث الاختبار.' : 'تم إنشاء الاختبار.')
+      await loadTests()
+    } catch (error) {
+      setMessage(error.message || 'تعذر حفظ الاختبار.')
+    }
+
+    setLoading(false)
+  }
+
+  function editTest(test) {
+    setEditingId(test.id)
+    setTestTitle(test.title || '')
+    setTestInstructions(test.instructions || '')
+    window.scrollTo({ top: 0, behavior: 'smooth' })
+  }
+
+  async function toggleTest(test) {
+    setLoading(true)
+    setMessage('')
+
+    const { error } = await supabase
+      .from('mfft_tests')
+      .update({ is_active: !test.is_active })
+      .eq('id', test.id)
+
+    if (error) {
+      setMessage('تعذر تغيير حالة الاختبار: ' + error.message)
+    } else {
+      setMessage('تم تحديث حالة الاختبار.')
+      await loadTests()
+    }
+
+    setLoading(false)
+  }
+
+  function validateImage(file, label) {
+    if (!file) {
+      throw new Error(`اختر صورة ${label}.`)
+    }
+
+    if (!file.type.startsWith('image/')) {
+      throw new Error(`الملف المحدد لـ ${label} ليس صورة.`)
+    }
+
+    if (file.size > MAX_IMAGE_SIZE) {
+      throw new Error(`حجم صورة ${label} أكبر من 5 ميجابايت.`)
+    }
+  }
+
+  async function uploadImage(file, path) {
+    const { error } = await supabase.storage
+      .from(BUCKET)
+      .upload(path, file, {
+        contentType: file.type,
+        upsert: false
+      })
+
+    if (error) throw error
+    return path
+  }
+
+  async function saveQuestion(e) {
+    e.preventDefault()
+    setLoading(true)
+    setMessage('')
+
+    const uploadedPaths = []
+
+    try {
+      if (!selectedTestId) {
+        throw new Error('اختر الاختبار أولاً.')
+      }
+
+      const order = Number(questionOrder)
+
+      if (!Number.isInteger(order) || order < 1) {
+        throw new Error('رقم السؤال يجب أن يكون عدداً صحيحاً موجباً.')
+      }
+
+      validateImage(originalFile, 'السؤال الأصلي')
+
+      for (let i = 0; i < OPTION_COUNT; i++) {
+        validateImage(optionFiles[i], `البديل رقم ${i + 1}`)
+      }
+
+      const folder = `questions/${selectedTestId}/${makeId()}`
+
+      const originalPath = await uploadImage(
+        originalFile,
+        `${folder}/original-${makeId()}`
+      )
+      uploadedPaths.push(originalPath)
+
+      const options = []
+
+      for (let i = 0; i < OPTION_COUNT; i++) {
+        const path = await uploadImage(
+          optionFiles[i],
+          `${folder}/option-${i + 1}-${makeId()}`
+        )
+
+        uploadedPaths.push(path)
+
+        options.push({
+          image_path: path,
+          is_correct: i === Number(correctIndex)
+        })
+      }
+
+      const { error } = await supabase.rpc(
+        'mfft_admin_save_question',
+        {
+          p_test_id: selectedTestId,
+          p_question_order: order,
+          p_original_image_path: originalPath,
+          p_options: options
+        }
+      )
+
+      if (error) throw error
+
+      setMessage('تم حفظ السؤال وصوره وبدائله بنجاح.')
+      setQuestionOrder(String(order + 1))
+      setOriginalFile(null)
+      setOptionFiles(Array(OPTION_COUNT).fill(null))
+      setCorrectIndex(0)
+
+      const originalInput = document.getElementById('original-image')
+      if (originalInput) originalInput.value = ''
+
+      for (let i = 0; i < OPTION_COUNT; i++) {
+        const input = document.getElementById(`option-image-${i}`)
+        if (input) input.value = ''
+      }
+
+      await loadQuestions(selectedTestId)
+    } catch (error) {
+      if (uploadedPaths.length) {
+        await supabase.storage
+          .from(BUCKET)
+          .remove(uploadedPaths)
+      }
+
+      setMessage(
+        'تعذر حفظ السؤال: ' + (error.message || 'خطأ غير معروف.')
+      )
+    }
+
+    setLoading(false)
+  }
+
+  async function loadQuestions(testId) {
+    setMessage('')
+
+    try {
+      const { data, error } = await supabase.rpc(
+        'mfft_admin_list_questions',
+        { p_test_id: testId }
+      )
+
+      if (error) throw error
+
+      const rows = Array.isArray(data) ? data : []
+
+      const prepared = await Promise.all(
+        rows.map(async item => {
+          const question = item.question || item
+          const options = item.options || []
+
+          const originalPath = getQuestionImage(question)
+
+          let originalUrl = ''
+
+          if (originalPath) {
+            const { data: signed } = await supabase.storage
+              .from(BUCKET)
+              .createSignedUrl(originalPath, 3600)
+
+            originalUrl = signed?.signedUrl || ''
+          }
+
+          const preparedOptions = await Promise.all(
+            options.map(async option => {
+              const path = getOptionImage(option)
+
+              if (!path) return { ...option, previewUrl: '' }
+
+              const { data: signed } = await supabase.storage
+                .from(BUCKET)
+                .createSignedUrl(path, 3600)
+
+              return {
+                ...option,
+                previewUrl: signed?.signedUrl || ''
+              }
+            })
+          )
+
+          return {
+            question,
+            options: preparedOptions,
+            originalUrl
+          }
+        })
+      )
+
+      setQuestions(prepared)
+    } catch (error) {
+      setQuestions([])
+      setMessage('تعذر تحميل بنك الأسئلة: ' + error.message)
+    }
+  }
+
+  async function logout() {
+    await supabase.auth.signOut()
+    setAdmin(null)
+    setTests([])
+    setQuestions([])
+    setSelectedTestId('')
+  }
+
+  function studentLogout() {
+    setStudentSession(null)
+    setStudentCode('')
+    setStudentPhone('')
+    setStudentTestData(null)
+    setAttemptId('')
+    setTestStarted(false)
+    setCurrentQuestionIndex(0)
+    setTestFinished(false)
+    setTestMessage('')
+    setMessage('تم تسجيل الخروج من الواجهة.')
+  }
+
+  async function callStudentTest(actionData) {
+    if (!studentSession?.token) {
+      throw new Error('انتهت جلسة الطالب. سجّل الدخول من جديد.')
+    }
+
+    const { data, error } = await supabase.functions.invoke('student-test', {
+      body: {
+        ...actionData,
+        token: studentSession.token
+      }
+    })
+
+    if (error) throw error
+    if (data?.error) throw new Error(data.error)
+    return data
+  }
+
+  async function prepareStudentTest() {
+    setLoading(true)
+    setMessage('')
+    setTestMessage('')
+
+    try {
+      const data = await callStudentTest({ action: 'start' })
+
+      if (!data?.success || !data.attempt_id || !Array.isArray(data.questions)) {
+        throw new Error('لم تصل بيانات الاختبار بالشكل المتوقع.')
+      }
+
+      if (data.questions.length === 0) {
+        throw new Error('لا توجد أسئلة في الاختبار النشط حالياً.')
+      }
+
+      setStudentTestData(data)
+      setAttemptId(data.attempt_id)
+      setCurrentQuestionIndex(0)
+      setTestStarted(false)
+      setTestFinished(false)
+      setTestMessage('تم تحميل الاختبار. اقرأ التعليمات ثم اضغط «ابدأ الاختبار».')
+    } catch (error) {
+      setMessage(error.message || 'تعذر تحميل الاختبار.')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  async function beginStudentTest() {
+    if (!studentTestData?.questions?.length || !attemptId) return
+
+    setLoading(true)
+    setTestMessage('')
+
+    try {
+      const firstQuestion = studentTestData.questions[0]
+      await callStudentTest({
+        action: 'present',
+        attempt_id: attemptId,
+        question_id: firstQuestion.id
+      })
+      setTestStarted(true)
+      setCurrentQuestionIndex(0)
+      setTestMessage('')
+    } catch (error) {
+      setTestMessage(error.message || 'تعذر بدء السؤال الأول.')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  async function submitStudentAnswer(optionId) {
+    const currentQuestion = studentTestData?.questions?.[currentQuestionIndex]
+    if (!currentQuestion || !attemptId || answerLoading) return
+
+    setAnswerLoading(true)
+    setTestMessage('')
+
+    try {
+      const result = await callStudentTest({
+        action: 'answer',
+        attempt_id: attemptId,
+        question_id: currentQuestion.id,
+        option_id: optionId
+      })
+
+      if (result?.is_correct && result?.question_completed) {
+        const nextIndex = currentQuestionIndex + 1
+        const nextQuestion = studentTestData.questions[nextIndex]
+
+        if (nextQuestion) {
+          await callStudentTest({
+            action: 'present',
+            attempt_id: attemptId,
+            question_id: nextQuestion.id
+          })
+          setCurrentQuestionIndex(nextIndex)
+          setTestMessage('إجابة صحيحة. انتقل إلى السؤال التالي.')
+        } else {
+          setTestFinished(true)
+          setTestMessage('أكملت جميع الأسئلة، وتم تسجيل إجاباتك.')
+        }
+      } else {
+        setTestMessage('هذه ليست الإجابة الصحيحة. حاول مرة أخرى.')
+      }
+    } catch (error) {
+      setTestMessage(error.message || 'تعذر تسجيل الإجابة. حاول مرة أخرى.')
+    } finally {
+      setAnswerLoading(false)
+    }
+  }
+
+  return (
+    <div dir="rtl" style={styles.app}>
+      <header style={styles.header}>
+        <h1>منصة MFFT التعليمية</h1>
+        <p>منصة الاختبارات والبحث العلمي</p>
+      </header>
+
+      {page === 'admin' ? (
+        <main style={styles.panel}>
+          {!admin ? (
+            <>
+              <h2>دخول المدير</h2>
+
+              <form onSubmit={adminLogin}>
+                <label>البريد الإلكتروني</label>
+                <input
+                  type="email"
+                  value={email}
+                  onChange={e => setEmail(e.target.value)}
+                  required
+                  style={styles.input}
+                />
+
+                <label>كلمة المرور</label>
+                <input
+                  type="password"
+                  value={password}
+                  onChange={e => setPassword(e.target.value)}
+                  required
+                  style={styles.input}
+                />
+
+                <button style={styles.button} disabled={loading}>
+                  {loading ? 'جارٍ التحقق...' : 'دخول الإدارة'}
+                </button>
+              </form>
+
+              {message && <p style={styles.message}>{message}</p>}
+            </>
+          ) : (
+            <>
+              <h2>لوحة الإدارة</h2>
+              <p>مرحباً {admin.full_name}</p>
+
+              <hr />
+              <h3>إضافة طالب جديد</h3>
+
+              <form onSubmit={addStudent}>
+                <label>اسم الطالب</label>
+                <input
+                  style={styles.input}
+                  value={student.name}
+                  onChange={e =>
+                    setStudent({ ...student, name: e.target.value })
+                  }
+                  required
+                />
+
+                <label>رقم الهاتف</label>
+                <input
+                  style={styles.input}
+                  type="tel"
+                  value={student.phone}
+                  onChange={e =>
+                    setStudent({ ...student, phone: e.target.value })
+                  }
+                  required
+                />
+
+                <label>العمر</label>
+                <input
+                  style={styles.input}
+                  type="number"
+                  min="5"
+                  max="100"
+                  value={student.age}
+                  onChange={e =>
+                    setStudent({ ...student, age: e.target.value })
+                  }
+                  required
+                />
+
+                <label>البريد الإلكتروني (اختياري)</label>
+                <input
+                  style={styles.input}
+                  type="email"
+                  value={student.email}
+                  onChange={e =>
+                    setStudent({ ...student, email: e.target.value })
+                  }
+                />
+
+                <button style={styles.button} disabled={loading}>
+                  {loading ? 'جارٍ الإضافة...' : 'إضافة الطالب'}
+                </button>
+              </form>
+
+              {createdCode && (
+                <div style={styles.result}>
+                  <h3>الرقم التعريفي للطالب</h3>
+                  <strong>{createdCode}</strong>
+                  <p>احتفظ بهذا الرقم لتسليمه للطالب.</p>
+                </div>
+              )}
+
+              <hr />
+              <h3>إدارة الاختبارات</h3>
+
+              <form onSubmit={saveTest}>
+                <label>عنوان الاختبار</label>
+                <input
+                  style={styles.input}
+                  value={testTitle}
+                  onChange={e => setTestTitle(e.target.value)}
+                  placeholder="مثلاً: اختبار MFFT"
+                  required
+                />
+
+                <label>تعليمات الاختبار</label>
+                <textarea
+                  style={{ ...styles.input, minHeight: 110 }}
+                  value={testInstructions}
+                  onChange={e => setTestInstructions(e.target.value)}
+                  placeholder="اكتب تعليمات الاختبار للطلاب..."
+                />
+
+                <button style={styles.button} disabled={loading}>
+                  {loading
+                    ? 'جارٍ الحفظ...'
+                    : editingId
+                      ? 'حفظ التعديلات'
+                      : 'إنشاء اختبار'}
+                </button>
+
+                {editingId && (
+                  <button
+                    type="button"
+                    style={styles.logout}
+                    onClick={() => {
+                      setEditingId(null)
+                      setTestTitle('')
+                      setTestInstructions('')
+                    }}
+                  >
+                    إلغاء التعديل
+                  </button>
+                )}
+              </form>
+
+              <h3>الاختبارات المسجلة ({tests.length})</h3>
+
+              {tests.length === 0 ? (
+                <p>لا توجد اختبارات حتى الآن.</p>
+              ) : (
+                tests.map(test => (
+                  <div key={test.id} style={styles.testCard}>
+                    <h4>{test.title}</h4>
+                    <p>{test.instructions || 'لا توجد تعليمات.'}</p>
+                    <p>
+                      الحالة:{' '}
+                      <strong>
+                        {test.is_active ? 'نشط' : 'غير نشط'}
+                      </strong>
+                    </p>
+
+                    <button
+                      style={styles.smallButton}
+                      onClick={() => editTest(test)}
+                    >
+                      تعديل
+                    </button>
+
+                    <button
+                      style={styles.smallButton}
+                      disabled={loading}
+                      onClick={() => toggleTest(test)}
+                    >
+                      {test.is_active ? 'تعطيل' : 'تفعيل'}
+                    </button>
+                  </div>
+                ))
+              )}
+
+              <hr />
+              <h3>بنك الأسئلة والصور</h3>
+              <p>
+                اختر الاختبار الذي تريد إضافة الأسئلة إليه.
+              </p>
+
+              <label>الاختبار</label>
+              <select
+                style={styles.input}
+                value={selectedTestId}
+                onChange={e => setSelectedTestId(e.target.value)}
+              >
+                <option value="">-- اختر اختباراً --</option>
+                {tests.map(test => (
+                  <option key={test.id} value={test.id}>
+                    {test.title}
+                  </option>
+                ))}
+              </select>
+
+              {selectedTestId ? (
+                <form onSubmit={saveQuestion}>
+                  <h4>إضافة سؤال جديد</h4>
+
+                  <label>رقم السؤال</label>
+                  <input
+                    style={styles.input}
+                    type="number"
+                    min="1"
+                    step="1"
+                    value={questionOrder}
+                    onChange={e => setQuestionOrder(e.target.value)}
+                    required
+                  />
+
+                  <label>الصورة الأصلية للسؤال</label>
+                  <input
+                    id="original-image"
+                    style={styles.input}
+                    type="file"
+                    accept="image/*"
+                    onChange={e =>
+                      setOriginalFile(e.target.files?.[0] || null)
+                    }
+                    required
+                  />
+
+                  <h4>البدائل الثمانية</h4>
+                  <p>حدد صورة لكل بديل، ثم اختر البديل الصحيح.</p>
+
+                  {optionFiles.map((file, index) => (
+                    <div key={index} style={styles.optionCard}>
+                      <label>
+                        <strong>البديل {index + 1}</strong>
+                      </label>
+
+                      <input
+                        id={`option-image-${index}`}
+                        style={styles.input}
+                        type="file"
+                        accept="image/*"
+                        onChange={e => {
+                          const next = [...optionFiles]
+                          next[index] = e.target.files?.[0] || null
+                          setOptionFiles(next)
+                        }}
+                        required
+                      />
+
+                      <label style={styles.radioLabel}>
+                        <input
+                          type="radio"
+                          name="correct-option"
+                          checked={Number(correctIndex) === index}
+                          onChange={() => setCorrectIndex(index)}
+                        />
+                        هذا هو البديل الصحيح
+                      </label>
+
+                      {file && (
+                        <small>{file.name}</small>
+                      )}
+                    </div>
+                  ))}
+
+                  <button
+                    style={styles.button}
+                    disabled={loading}
+                  >
+                    {loading ? 'جارٍ رفع الصور والحفظ...' : 'حفظ السؤال والبدائل'}
+                  </button>
+                </form>
+              ) : (
+                <p>أنشئ اختباراً أو اختر اختباراً موجوداً أولاً.</p>
+              )}
+
+              <h3>الأسئلة المسجلة ({questions.length})</h3>
+
+              {questions.length === 0 ? (
+                <p>لا توجد أسئلة مسجلة لهذا الاختبار، أو لم يتم تحميلها بعد.</p>
+              ) : (
+                questions.map((item, index) => (
+                  <div key={item.question.id || index} style={styles.testCard}>
+                    <h4>
+                      السؤال رقم {getQuestionOrder(item.question) || index + 1}
+                    </h4>
+
+                    {item.originalUrl && (
+                      <img
+                        src={item.originalUrl}
+                        alt="الصورة الأصلية"
+                        style={styles.questionImage}
+                      />
+                    )}
+
+                    <div style={styles.imageGrid}>
+                      {item.options.map((option, optionIndex) => (
+                        <div key={option.id || optionIndex}>
+                          {option.previewUrl && (
+                            <img
+                              src={option.previewUrl}
+                              alt={`البديل ${optionIndex + 1}`}
+                              style={styles.optionImage}
+                            />
+                          )}
+                          <small>
+                            البديل {optionIndex + 1}
+                            {option.is_correct ? ' — الصحيح' : ''}
+                          </small>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ))
+              )}
+
+              {message && <p style={styles.message}>{message}</p>}
+
+              <button style={styles.logout} onClick={logout}>
+                تسجيل الخروج
+              </button>
+            </>
+          )}
+        </main>
+      ) : (
+        <main style={styles.panel}>
+          {!studentSession ? (
+            <>
+              <h2>دخول الطالب</h2>
+              <p>أدخل الرقم التعريفي ورقم الهاتف المسجل لدى الإدارة.</p>
+
+              <form onSubmit={studentLogin}>
+                <label>الرقم التعريفي</label>
+                <input
+                  style={styles.input}
+                  value={studentCode}
+                  onChange={e => setStudentCode(e.target.value)}
+                  placeholder="MFFT-XXXXXXXX"
+                  required
+                />
+
+                <label>رقم الهاتف</label>
+                <input
+                  style={styles.input}
+                  type="tel"
+                  value={studentPhone}
+                  onChange={e => setStudentPhone(e.target.value)}
+                  required
+                />
+
+                <button style={styles.button} disabled={loading}>
+                  {loading ? 'جارٍ التحقق...' : 'دخول الطالب'}
+                </button>
+              </form>
+
+              {message && <p style={styles.message}>{message}</p>}
+            </>
+          ) : (
+            <>
+              <h2>مرحباً {studentSession.student.student_name}</h2>
+              <p>تم التحقق من بياناتك بنجاح.</p>
+              <p>الرقم التعريفي: {studentSession.student.student_code}</p>
+              {!studentTestData ? (
+                <>
+                  <p>يمكنك تحميل الاختبار النشط والبدء بعد قراءة التعليمات.</p>
+                  <button
+                    type="button"
+                    style={styles.button}
+                    disabled={loading}
+                    onClick={prepareStudentTest}
+                  >
+                    {loading ? 'جارٍ تحميل الاختبار...' : 'تحميل الاختبار'}
+                  </button>
+                </>
+              ) : (
+                <>
+                  <hr />
+                  <h3>{studentTestData.test?.title || 'اختبار MFFT'}</h3>
+
+                  {!testStarted && !testFinished ? (
+                    <>
+                      <p style={{ whiteSpace: 'pre-wrap' }}>
+                        {studentTestData.test?.instructions || 'اقرأ السؤال جيداً، ثم اختر الصورة المطابقة.'}
+                      </p>
+                      <p>عدد الأسئلة: {studentTestData.questions.length}</p>
+                      <button
+                        type="button"
+                        style={styles.button}
+                        disabled={loading}
+                        onClick={beginStudentTest}
+                      >
+                        {loading ? 'جارٍ البدء...' : 'ابدأ الاختبار'}
+                      </button>
+                    </>
+                  ) : testFinished ? (
+                    <div style={styles.result}>
+                      <h3>اكتمل الاختبار</h3>
+                      <p>تم تسجيل إجاباتك لجميع الأسئلة.</p>
+                      <p>
+                        لم تُعرض النتيجة بعد؛ إذ يلزم استكمال خطوة إنهاء المحاولة
+                        وحساب النتائج قبل اعتمادها.
+                      </p>
+                    </div>
+                  ) : (
+                    (() => {
+                      const question = studentTestData.questions[currentQuestionIndex]
+                      if (!question) return <p>تعذر العثور على السؤال الحالي.</p>
+
+                      return (
+                        <>
+                          <h3>
+                            السؤال {currentQuestionIndex + 1} من {studentTestData.questions.length}
+                          </h3>
+                          <img
+                            src={question.stimulus_image_url}
+                            alt="الصورة الأصلية للسؤال"
+                            style={styles.questionImage}
+                          />
+
+                          <p>اختر الصورة التي تطابق الصورة الأصلية:</p>
+                          <div style={styles.imageGrid}>
+                            {question.options.map((option, optionIndex) => (
+                              <button
+                                type="button"
+                                key={option.id}
+                                disabled={answerLoading}
+                                onClick={() => submitStudentAnswer(option.id)}
+                                style={{
+                                  ...styles.optionCard,
+                                  cursor: answerLoading ? 'wait' : 'pointer',
+                                  textAlign: 'center',
+                                  color: '#1e293b',
+                                  font: 'inherit'
+                                }}
+                              >
+                                <img
+                                  src={option.image_url}
+                                  alt={`الاختيار ${optionIndex + 1}`}
+                                  style={styles.optionImage}
+                                />
+                                <strong>الاختيار {optionIndex + 1}</strong>
+                              </button>
+                            ))}
+                          </div>
+                          {answerLoading && <p style={styles.message}>جارٍ تسجيل الإجابة...</p>}
+                        </>
+                      )
+                    })()
+                  )}
+
+                  {testMessage && <p style={styles.message}>{testMessage}</p>}
+                </>
+              )}
+
+              <button style={styles.logout} onClick={studentLogout}>
+                تسجيل الخروج
+              </button>
+            </>
+          )}
+        </main>
+      )}
+
+      <footer style={styles.footer}>
+        جميع الحقوق محفوظة © منصة MFFT
+      </footer>
+    </div>
+  )
+}
+
+const styles = {
+  app: {
+    minHeight: '100vh',
+    background: '#f1f5f9',
+    fontFamily: 'Arial, sans-serif',
+    color: '#1e293b'
+  },
+  header: {
+    background: '#123b5d',
+    color: 'white',
+    textAlign: 'center',
+    padding: '25px'
+  },
+  panel: {
+    background: 'white',
+    maxWidth: '620px',
+    margin: '30px auto',
+    padding: '25px',
+    borderRadius: '14px',
+    boxShadow: '0 3px 15px #0001'
+  },
+  input: {
+    display: 'block',
+    width: '100%',
+    boxSizing: 'border-box',
+    padding: '12px',
+    margin: '8px 0 18px',
+    border: '1px solid #cbd5e1',
+    borderRadius: '7px',
+    background: 'white'
+  },
+  button: {
+    width: '100%',
+    padding: '13px',
+    background: '#176b87',
+    color: 'white',
+    border: 'none',
+    borderRadius: '8px',
+    cursor: 'pointer',
+    marginTop: '12px'
+  },
+  smallButton: {
+    padding: '9px 14px',
+    margin: '5px',
+    background: '#176b87',
+    color: 'white',
+    border: 'none',
+    borderRadius: '7px'
+  },
+  testCard: {
+    border: '1px solid #cbd5e1',
+    borderRadius: '9px',
+    padding: '14px',
+    margin: '12px 0'
+  },
+  optionCard: {
+    border: '1px solid #dbe3ec',
+    borderRadius: '9px',
+    padding: '12px',
+    margin: '12px 0',
+    background: '#f8fafc'
+  },
+  radioLabel: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '8px',
+    margin: '8px 0'
+  },
+  questionImage: {
+    display: 'block',
+    maxWidth: '100%',
+    maxHeight: '260px',
+    objectFit: 'contain',
+    margin: '12px auto'
+  },
+  imageGrid: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
+    gap: '12px',
+    marginTop: '12px'
+  },
+  optionImage: {
+    width: '100%',
+    height: '120px',
+    objectFit: 'contain',
+    border: '1px solid #ddd',
+    borderRadius: '6px'
+  },
+  message: {
+    marginTop: '15px',
+    color: '#176b87',
+    overflowWrap: 'anywhere'
+  },
+  result: {
+    marginTop: '20px',
+    padding: '18px',
+    background: '#e7f5ec',
+    borderRadius: '10px',
+    textAlign: 'center'
+  },
+  logout: {
+    width: '100%',
+    padding: '12px',
+    marginTop: '20px',
+    background: '#64748b',
+    color: 'white',
+    border: 'none',
+    borderRadius: '8px'
+  },
+  footer: {
+    textAlign: 'center',
+    padding: '20px'
+  }
+}
